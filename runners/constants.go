@@ -22,7 +22,7 @@ const PreviousCapacityBytesAnnotation = "resize.kubesphere.io/pre-capacity-bytes
 const AutoRestartEnabledKey = "restart.kubesphere.io/enabled"
 
 // SupportOnlineResize is the key of flag that the storage class support online expansion
-const SupportOnlineResize = "restart.kubesphere.io/online-resize-support"
+const SupportOnlineResize = "restart.kubesphere.io/online-expansion-support"
 
 // RestartSkip is the key of flag that the workload don't need autoRestart
 const RestartSkip = "restart.kubesphere.io/skip"
