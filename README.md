@@ -1,3 +1,6 @@
+# NOTICE
+
+This repo is forked from [topolvm/pvc-autoresizer](https://github.com/topolvm/pvc-autoresizer) .This one adds storage class level control and automatic restart of workloads on top of that.
 # pvc-autoresizer
 
 `pvc-autoresizer` resizes PersistentVolumeClaims (PVCs) when the free amount of storage is below the threshold.
@@ -30,7 +33,7 @@ Specify the Prometheus URL to `pvc-autoresizer` argument as `--prometheus-url`.
 helm install --create-namespace --namespace pvc-autoresizer pvc-autoresizer pvc-autoresizer/pvc-autoresizer --set "controller.args.prometheusURL=<YOUR PROMETHEUS ENDPOINT>"
 ```
 
-See the Chart [README.md](./charts/pvc-autoresizer/README.md) for detailed documentation on the Helm Chart.
+See the Chart [README.md](https://github.com/kubesphere/helm-charts/tree/master/src/main/pvc-autoresizer) for detailed documentation on the Helm Chart.
 
 ## How to use
 ### pvc-autoresize
@@ -95,6 +98,7 @@ spec:
 ```
 
 ### workload-autoRestart
+The restarter judges the workload that needs to be restarted automatically by checking the status of pvc, and the restarter will stop the workload after successful expansion or timeout and then turn it on again.
 If you have a storage class that only supports offline expansion, and need to automatically complete the expansion, you can add the following annotations:
 ```yaml
 kind: StorageClass
@@ -105,47 +109,23 @@ metadata:
     app.kubernetes.io/managed-by: Helm
   annotations:
     restart.kubesphere.io/enabled: 'true'
-    restart.kubesphere.io/online-resize-support: 'false'
+    restart.kubesphere.io/online-expansion-support: 'false'
     restart.kubesphere.io/max-time: '300'
 ```
+The workload-autoRestart will run when `restart.kubesphere.io/enabled` is *true* and `restart.kubesphere.io/online-expansion-support` is *false*.
+`restart.kubesphere.io/max-time` defines the maximum number of seconds that can be waited for restarting a workload. If the time is exceeded and the restart is not successful, the workload will be skipped afterwards.
 
-Add the following annotations to deployments that do not require automatic restart:
+
+Add the following annotations to Deployment or StatefulSet that do not require automatic restart:
 ```yaml
-kind: Deployment
+kind: 
 apiVersion: apps/v1
 metadata:
-  name: kubesphere-deployment
+  name: kubesphere-workload
   namespace: default
   annotations:
     restart.kubesphere.io/skip: "true"
 ```
 ## Container images
 
-Container images are available on [Dockerhub](https://hub.docker.com/repository/docker/f10atin9/pvc-autoresizer)
-
-
-## Prometheus metrics
-
-###  `pvcautoresizer_kubernetes_client_fail_total`
-
-`pvcautoresizer_kubernetes_client_fail_total` is a counter that indicates how many API requests to kube-api server are failed.
-
-### `pvcautoresizer_metrics_client_fail_total`
-
-`pvcautoresizer_metrics_client_fail_total` is a counter that indicates how many API requests to metrics server(e.g. prometheus) are failed.
-
-### `pvcautoresizer_loop_seconds_total`
-
-`pvcautoresizer_loop_seconds_total` is a counter that indicates the sum of seconds spent on volume expansion processing loops.
-
-###  `pvcautoresizer_success_resize_total`
-
-`pvcautoresizer_success_resize_total` is a counter that indicates how many volume expansion processing resizes succeed.
-
-###  `pvcautoresizer_failed_resize_total`
-
-`pvcautoresizer_failed_resize_total` is a counter that indicates how many volume expansion processing resizes fail.
-
-###  `pvcautoresizer_limit_reached_total`
-
-`pvcautoresizer_limit_reached_total` is a counter that indicates how many storage limit was reached.
+Container images are available on [Dockerhub](https://hub.docker.com/repository/docker/kubespheredev/pvc-autoresizer)
