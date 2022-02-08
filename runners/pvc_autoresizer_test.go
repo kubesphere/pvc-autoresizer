@@ -3,7 +3,6 @@ package runners
 import (
 	"context"
 	"fmt"
-	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo"
@@ -447,8 +446,4 @@ func setMetrics(ns, name string, availableBytes, capacityBytes, availableInodeSi
 		AvailableInodeSize: availableInodeSize,
 		CapacityInodeSize:  capacityInodeSize,
 	})
-}
-
-func TestParse(t *testing.T) {
-
 }
