@@ -148,10 +148,10 @@ func (w *pvcAutoresizer) resize(ctx context.Context, pvc *corev1.PersistentVolum
 	log := w.log.WithName("resize").WithValues("namespace", pvc.Namespace, "name", pvc.Name)
 
 	var resizeThreshold string
-	if annotation, ok := sc.Annotations[ResizeThresholdAnnotation]; ok && annotation != "" {
+	if annotation, ok := pvc.Annotations[ResizeThresholdAnnotation]; ok && annotation != "" {
 		resizeThreshold = annotation
 	} else {
-		resizeThreshold = pvc.Annotations[ResizeThresholdAnnotation]
+		resizeThreshold = sc.Annotations[ResizeThresholdAnnotation]
 	}
 	threshold, err := convertSizeInBytes(resizeThreshold, vs.CapacityBytes, DefaultThreshold)
 	if err != nil {
@@ -169,10 +169,10 @@ func (w *pvcAutoresizer) resize(ctx context.Context, pvc *corev1.PersistentVolum
 
 	curReq := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
 	var resizeIncrease string
-	if annotation, ok := sc.Annotations[ResizeIncreaseAnnotation]; ok && annotation != "" {
+	if annotation, ok := pvc.Annotations[ResizeIncreaseAnnotation]; ok && annotation != "" {
 		resizeIncrease = annotation
 	} else {
-		resizeIncrease = pvc.Annotations[ResizeIncreaseAnnotation]
+		resizeIncrease = sc.Annotations[ResizeIncreaseAnnotation]
 	}
 	increase, err := convertSizeInBytes(resizeIncrease, curReq.Value(), DefaultIncrease)
 	if err != nil {
