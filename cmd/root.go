@@ -5,16 +5,18 @@ import (
 	"os"
 	"time"
 
+	prometheus "github.com/prometheus/common/config"
 	"github.com/spf13/cobra"
 )
 
 var config struct {
-	metricsAddr    string
-	healthAddr     string
-	watchInterval  time.Duration
-	prometheusURL  string
-	skipAnnotation bool
-	development    bool
+	metricsAddr      string
+	healthAddr       string
+	watchInterval    time.Duration
+	prometheusURL    string
+	skipAnnotation   bool
+	development      bool
+	HTTPClientConfig prometheus.HTTPClientConfig
 }
 
 // rootCmd represents the base command when called without any subcommands
