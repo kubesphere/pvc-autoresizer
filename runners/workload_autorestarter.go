@@ -3,6 +3,9 @@ package runners
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"time"
+
 	"github.com/go-logr/logr"
 	"github.com/prometheus/common/log"
 	appsV1 "k8s.io/api/apps/v1"
@@ -12,8 +15,6 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"strconv"
-	"time"
 )
 
 type restarter struct {
@@ -148,6 +149,14 @@ func (c *restarter) getPVCListByConditionsType(ctx context.Context, pvcType v1.P
 		if len(pvc.Status.Conditions) > 0 && pvc.Status.Conditions[0].Type == pvcType {
 			if _, ok := scNeedRestart[*pvc.Spec.StorageClassName]; ok {
 				pvcs = append(pvcs, pvc)
+			} else if val, ok := pvc.Annotations[AutoRestartEnabledKey]; ok {
+				NeedRestart, err := strconv.ParseBool(val)
+				if err != nil {
+					continue
+				}
+				if NeedRestart {
+					pvcs = append(pvcs, pvc)
+				}
 			}
 		}
 	}
