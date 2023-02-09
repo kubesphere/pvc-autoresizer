@@ -23,7 +23,7 @@ const (
 
 // NewPrometheusClient returns a new prometheusClient
 func NewPrometheusClient(url string, HTTPClientConfig *config.HTTPClientConfig) (MetricsClient, error) {
-	roundTripper, err := config.NewRoundTripperFromConfig(*HTTPClientConfig, "kubesphere")
+	roundTripper, err := config.NewRoundTripperFromConfig(*HTTPClientConfig, "kubesphere", true)
 	if err != nil {
 		return nil, err
 	}
