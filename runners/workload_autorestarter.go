@@ -17,11 +17,10 @@ import (
 )
 
 type restarter struct {
-	client        client.Client
-	metricsClient MetricsClient
-	interval      time.Duration
-	log           logr.Logger
-	recorder      record.EventRecorder
+	client   client.Client
+	interval time.Duration
+	log      logr.Logger
+	recorder record.EventRecorder
 }
 
 func NewRestarter(c client.Client, log logr.Logger, interval time.Duration, recorder record.EventRecorder) manager.Runnable {
@@ -105,25 +104,25 @@ func (c *restarter) reconcile(ctx context.Context) error {
 
 	//restart
 	for _, deploy := range startDeploy {
-		err := c.StartDeploy(ctx, deploy, false)
+		err := c.startDeploy(ctx, deploy, false)
 		if err != nil {
 			return err
 		}
 	}
 	for _, deploy := range timeoutDeploy {
-		err := c.StartDeploy(ctx, deploy, true)
+		err := c.startDeploy(ctx, deploy, true)
 		if err != nil {
 			return err
 		}
 	}
 	for _, sts := range startSts {
-		err := c.StartSts(ctx, sts, false)
+		err := c.startSts(ctx, sts, false)
 		if err != nil {
 			return err
 		}
 	}
 	for _, sts := range timeoutSts {
-		err := c.StartSts(ctx, sts, true)
+		err := c.startSts(ctx, sts, true)
 		if err != nil {
 			return err
 		}
@@ -139,8 +138,7 @@ func (c *restarter) getPVCListByConditionsType(ctx context.Context, pvcType v1.P
 	if err != nil {
 		return pvcs, err
 	}
-	scNeedRestart := make(map[string]string, 0)
-	scNeedRestart, err = c.getSc(ctx)
+	scNeedRestart, err := c.getSc(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -172,17 +170,17 @@ func (c *restarter) getSc(ctx context.Context) (map[string]string, error) {
 	scMap := make(map[string]string, 0)
 	for _, sc := range scList.Items {
 		if val, ok := sc.Annotations[SupportOnlineResize]; ok {
-			SupportOnline, err := strconv.ParseBool(val)
+			supportOnline, err := strconv.ParseBool(val)
 			if err != nil {
 				return nil, err
 			}
-			if !SupportOnline {
+			if !supportOnline {
 				if val, ok := sc.Annotations[AutoRestartEnabledKey]; ok {
-					NeedRestart, err := strconv.ParseBool(val)
+					needRestart, err := strconv.ParseBool(val)
 					if err != nil {
 						return nil, err
 					}
-					if NeedRestart {
+					if needRestart {
 						scMap[sc.Name] = ""
 					}
 				}
@@ -196,7 +194,10 @@ func (c *restarter) stopDeploy(ctx context.Context, deploy *appsV1.Deployment) e
 	var zero int32
 	zero = 0
 	if val, ok := deploy.Annotations[RestartSkip]; ok {
-		skip, _ := strconv.ParseBool(val)
+		skip, err := strconv.ParseBool(val)
+		if err != nil {
+			return err
+		}
 		if skip {
 			c.log.Info("Skip restart deploy ", deploy.Name)
 			return nil
@@ -247,12 +248,12 @@ func (c *restarter) stopSts(ctx context.Context, sts *appsV1.StatefulSet) error 
 	updateSts.Annotations[RestartStage] = "resizing"
 	updateSts.Spec.Replicas = &zero
 	var opts []client.UpdateOption
-	c.log.Info("stop deployment:" + sts.Name)
+	c.log.Info("stop statefulset:" + sts.Name)
 	updateErr := c.client.Update(ctx, updateSts, opts...)
 	return updateErr
 }
 
-func (c *restarter) StartDeploy(ctx context.Context, deploy *appsV1.Deployment, timeout bool) error {
+func (c *restarter) startDeploy(ctx context.Context, deploy *appsV1.Deployment, timeout bool) error {
 	if _, ok := deploy.Annotations[RestartStage]; !ok {
 		return nil
 	}
@@ -281,7 +282,7 @@ func (c *restarter) StartDeploy(ctx context.Context, deploy *appsV1.Deployment, 
 	return err
 }
 
-func (c *restarter) StartSts(ctx context.Context, sts *appsV1.StatefulSet, timeout bool) error {
+func (c *restarter) startSts(ctx context.Context, sts *appsV1.StatefulSet, timeout bool) error {
 	if _, ok := sts.Annotations[RestartStage]; !ok {
 		return nil
 	}
@@ -305,7 +306,7 @@ func (c *restarter) StartSts(ctx context.Context, sts *appsV1.StatefulSet, timeo
 	delete(updateSts.Annotations, RestartStage)
 	updateSts.Spec.Replicas = &replicas
 	var opts []client.UpdateOption
-	c.log.Info("start deployment: " + sts.Name)
+	c.log.Info("start statefulset: " + sts.Name)
 	err = c.client.Update(ctx, updateSts, opts...)
 	return err
 }
@@ -358,7 +359,7 @@ func (c *restarter) getSts(ctx context.Context, targetPvc *v1.PersistentVolumeCl
 	return nil, fmt.Errorf("Cannot get deployment or statefulSet which pod mounted the pvc %s ", targetPvc.Name)
 }
 
-func (c *restarter) IfDeployTimeout(ctx context.Context, scName string, deploy *appsV1.Deployment) bool {
+func (c *restarter) ifDeployTimeout(ctx context.Context, scName string, deploy *appsV1.Deployment) bool {
 	sc := &storagev1.StorageClass{}
 	err := c.client.Get(ctx, types.NamespacedName{Namespace: "", Name: scName}, sc)
 	maxTime := 300
@@ -379,7 +380,7 @@ func (c *restarter) IfDeployTimeout(ctx context.Context, scName string, deploy *
 	return timeout
 }
 
-func (c *restarter) IfStsTimeout(ctx context.Context, scName string, sts *appsV1.StatefulSet) bool {
+func (c *restarter) ifStsTimeout(ctx context.Context, scName string, sts *appsV1.StatefulSet) bool {
 	sc := &storagev1.StorageClass{}
 	err := c.client.Get(ctx, types.NamespacedName{Namespace: "", Name: scName}, sc)
 	maxTime := 300
@@ -407,7 +408,7 @@ func (c *restarter) getAppList(ctx context.Context, pvcs []v1.PersistentVolumeCl
 			return deployToStop, stsToStop, deployTimeout, stsTimeout, err
 		}
 		if dep != nil {
-			if timeout := c.IfDeployTimeout(ctx, *pvc.Spec.StorageClassName, dep); timeout {
+			if timeout := c.ifDeployTimeout(ctx, *pvc.Spec.StorageClassName, dep); timeout {
 				deployTimeout = append(deployTimeout, dep)
 			} else {
 				deployToStop = append(deployToStop, dep)
@@ -419,7 +420,7 @@ func (c *restarter) getAppList(ctx context.Context, pvcs []v1.PersistentVolumeCl
 			return deployToStop, stsToStop, deployTimeout, stsTimeout, err
 		}
 		if sts != nil {
-			if timeout := c.IfStsTimeout(ctx, *pvc.Spec.StorageClassName, sts); timeout {
+			if timeout := c.ifStsTimeout(ctx, *pvc.Spec.StorageClassName, sts); timeout {
 				stsTimeout = append(stsTimeout, sts)
 			} else {
 				stsToStop = append(stsToStop, sts)
