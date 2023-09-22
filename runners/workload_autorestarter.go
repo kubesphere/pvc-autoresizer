@@ -3,6 +3,7 @@ package runners
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -10,8 +11,8 @@ import (
 	appsV1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
@@ -53,221 +54,248 @@ func (c *restarter) Start(ctx context.Context) error {
 	}
 }
 
+type workloads struct {
+	deployToStop  map[string]*appsV1.Deployment
+	stsToStop     map[string]*appsV1.StatefulSet
+	deployToStart map[string]*appsV1.Deployment
+	stsToStart    map[string]*appsV1.StatefulSet
+	deployTimeout map[string]*appsV1.Deployment
+	stsTimeout    map[string]*appsV1.StatefulSet
+}
+
 func (c *restarter) reconcile(ctx context.Context) error {
-	stopPvcs, stopPvcErr := c.getPVCListByConditionsType(ctx, v1.PersistentVolumeClaimResizing)
-	if stopPvcErr != nil {
-		return stopPvcErr
+	allPvc, err := c.getAllPVC(ctx)
+	if err != nil {
+		return err
+	}
+	allSc, err := c.getAllSc(ctx)
+	if err != nil {
+		return err
+	}
+	allDeploy, err := c.getAllDeploy(ctx)
+	if err != nil {
+		return err
+	}
+	allSts, err := c.getAllSts(ctx)
+	if err != nil {
+		return err
 	}
 
-	stopDeploy, stopSts, timeoutDeploy, timeoutSts, stopAppErr := c.getAppList(ctx, stopPvcs)
-	if stopAppErr != nil {
-		return stopAppErr
-	}
+	wls := c.getWorkloads(ctx, allPvc, allSc, allDeploy, allSts)
+
 	//stop deploy/sts
-	for _, deploy := range stopDeploy {
-		c.log.Info("Stopping deploy: ", deploy.Name)
-		err := c.stopDeploy(ctx, deploy)
+	for _, deploy := range wls.deployToStop {
+		err = c.stopDeploy(ctx, deploy)
 		if err != nil {
 			return err
 		}
 	}
-	for _, sts := range stopSts {
-		c.log.Info("Stopping StatefulSet: ", sts.Name)
-		err := c.stopSts(ctx, sts)
+	for _, sts := range wls.stsToStop {
+		err = c.stopSts(ctx, sts)
 		if err != nil {
 			return err
-		}
-	}
-
-	//get pvc need restart
-	startPvc, err := c.getPVCListByConditionsType(ctx, v1.PersistentVolumeClaimFileSystemResizePending)
-
-	//get list
-	startDeploy := make([]*appsV1.Deployment, 0)
-	startSts := make([]*appsV1.StatefulSet, 0)
-	for _, pvc := range startPvc {
-		dep, err := c.getDeploy(ctx, &pvc)
-		if err != nil {
-			return err
-		}
-		if dep != nil {
-			startDeploy = append(startDeploy, dep)
-			continue
-		}
-		sts, err := c.getSts(ctx, &pvc)
-		if err != nil {
-			return err
-		}
-		if sts != nil {
-			startSts = append(startSts, sts)
 		}
 	}
 
 	//restart
-	for _, deploy := range startDeploy {
-		err := c.StartDeploy(ctx, deploy, false)
+	for _, deploy := range wls.deployToStart {
+		err = c.startDeploy(ctx, deploy, false)
 		if err != nil {
 			return err
 		}
 	}
-	for _, deploy := range timeoutDeploy {
-		err := c.StartDeploy(ctx, deploy, true)
+	for _, deploy := range wls.deployTimeout {
+		err = c.startDeploy(ctx, deploy, true)
 		if err != nil {
 			return err
 		}
 	}
-	for _, sts := range startSts {
-		err := c.StartSts(ctx, sts, false)
+	for _, sts := range wls.stsToStart {
+		err = c.startSts(ctx, sts, false)
 		if err != nil {
 			return err
 		}
 	}
-	for _, sts := range timeoutSts {
-		err := c.StartSts(ctx, sts, true)
+	for _, sts := range wls.stsTimeout {
+		err = c.startSts(ctx, sts, true)
 		if err != nil {
 			return err
 		}
 	}
-	return err
+
+	return nil
 }
 
-func (c *restarter) getPVCListByConditionsType(ctx context.Context, pvcType v1.PersistentVolumeClaimConditionType) ([]v1.PersistentVolumeClaim, error) {
+func (c *restarter) getAllPVC(ctx context.Context) (*v1.PersistentVolumeClaimList, error) {
+	pvcList := &v1.PersistentVolumeClaimList{}
+	err := c.client.List(ctx, pvcList)
+	return pvcList, err
+}
+
+func (c *restarter) getWorkloads(ctx context.Context, pvcList *v1.PersistentVolumeClaimList, scList *storagev1.StorageClassList, deployList *appsV1.DeploymentList, stsList *appsV1.StatefulSetList) *workloads {
+	wls := &workloads{
+		deployToStop:  make(map[string]*appsV1.Deployment),
+		stsToStop:     make(map[string]*appsV1.StatefulSet),
+		deployToStart: make(map[string]*appsV1.Deployment),
+		stsToStart:    make(map[string]*appsV1.StatefulSet),
+		deployTimeout: make(map[string]*appsV1.Deployment),
+		stsTimeout:    make(map[string]*appsV1.StatefulSet),
+	}
+
 	pvcs := make([]v1.PersistentVolumeClaim, 0)
-	pvcList := v1.PersistentVolumeClaimList{}
-	var opts []client.ListOption
-	err := c.client.List(ctx, &pvcList, opts...)
-	if err != nil {
-		return pvcs, err
-	}
-	scNeedRestart := make(map[string]string, 0)
-	scNeedRestart, err = c.getSc(ctx)
-	if err != nil {
-		return nil, err
-	}
+	scNeedRestart := c.getRestartSc(ctx, scList)
 	for _, pvc := range pvcList.Items {
-		if len(pvc.Status.Conditions) > 0 && pvc.Status.Conditions[0].Type == pvcType {
+		if pvc.Spec.StorageClassName != nil {
 			if _, ok := scNeedRestart[*pvc.Spec.StorageClassName]; ok {
 				pvcs = append(pvcs, pvc)
 			} else if val, ok := pvc.Annotations[AutoRestartEnabledKey]; ok {
-				NeedRestart, err := strconv.ParseBool(val)
-				if err != nil {
-					continue
-				}
-				if NeedRestart {
+				needRestart, _ := strconv.ParseBool(val)
+				if needRestart {
 					pvcs = append(pvcs, pvc)
 				}
 			}
 		}
 	}
-	return pvcs, nil
+
+	for _, pvc := range pvcs {
+		sc := c.getScByName(ctx, scList, *pvc.Spec.StorageClassName)
+		if sc == nil {
+			continue
+		}
+		for _, condition := range pvc.Status.Conditions {
+			switch condition.Type {
+			case v1.PersistentVolumeClaimResizing:
+				dep := c.getDeploy(ctx, deployList, &pvc)
+				if dep != nil {
+					namespacedName := dep.Namespace + "/" + dep.Name
+					if timeout := c.ifWorkloadTimeout(ctx, sc, dep.Annotations); timeout {
+						wls.deployTimeout[namespacedName] = dep
+					} else {
+						wls.deployToStop[namespacedName] = dep
+					}
+				}
+				sts := c.getSts(ctx, stsList, &pvc)
+				if sts != nil {
+					namespacedName := sts.Namespace + "/" + sts.Name
+					if timeout := c.ifWorkloadTimeout(ctx, sc, sts.Annotations); timeout {
+						wls.stsTimeout[namespacedName] = sts
+					} else {
+						wls.stsToStop[namespacedName] = sts
+					}
+				}
+				break
+			case v1.PersistentVolumeClaimFileSystemResizePending:
+				dep := c.getDeploy(ctx, deployList, &pvc)
+				if dep != nil {
+					namespacedName := dep.Namespace + "/" + dep.Name
+					wls.deployToStart[namespacedName] = dep
+				}
+				sts := c.getSts(ctx, stsList, &pvc)
+				if sts != nil {
+					namespacedName := sts.Namespace + "/" + sts.Name
+					wls.stsToStart[namespacedName] = sts
+				}
+				break
+			default:
+				continue
+			}
+		}
+	}
+
+	return wls
 }
 
-func (c *restarter) getSc(ctx context.Context) (map[string]string, error) {
+func (c *restarter) getAllSc(ctx context.Context) (*storagev1.StorageClassList, error) {
 	scList := &storagev1.StorageClassList{}
-	var opts []client.ListOption
-	err := c.client.List(ctx, scList, opts...)
-	if err != nil {
-		return nil, err
-	}
-	scMap := make(map[string]string, 0)
+	err := c.client.List(ctx, scList)
+	return scList, err
+}
+
+func (c *restarter) getRestartSc(ctx context.Context, scList *storagev1.StorageClassList) map[string]string {
+	scMap := make(map[string]string)
 	for _, sc := range scList.Items {
 		if val, ok := sc.Annotations[SupportOnlineResize]; ok {
-			SupportOnline, err := strconv.ParseBool(val)
-			if err != nil {
-				return nil, err
-			}
-			if !SupportOnline {
-				if val, ok := sc.Annotations[AutoRestartEnabledKey]; ok {
-					NeedRestart, err := strconv.ParseBool(val)
-					if err != nil {
-						return nil, err
-					}
-					if NeedRestart {
+			supportOnline, err := strconv.ParseBool(val)
+			if err == nil && !supportOnline {
+				if val, ok = sc.Annotations[AutoRestartEnabledKey]; ok {
+					needRestart, err := strconv.ParseBool(val)
+					if err == nil && needRestart {
 						scMap[sc.Name] = ""
 					}
 				}
 			}
 		}
 	}
-	return scMap, nil
+	return scMap
 }
 
 func (c *restarter) stopDeploy(ctx context.Context, deploy *appsV1.Deployment) error {
-	var zero int32
-	zero = 0
-	if val, ok := deploy.Annotations[RestartSkip]; ok {
-		skip, _ := strconv.ParseBool(val)
-		if skip {
-			c.log.Info("Skip restart deploy ", deploy.Name)
-			return nil
-		}
-	}
-	if stage, ok := deploy.Annotations[RestartStage]; ok {
-		if stage == "resizing" {
-			return nil
-		}
+	zero := int32(0)
+	nsName := deploy.Namespace + "/" + deploy.Name
+	logger := c.log.WithName(nsName)
+	if !c.ensureAnnotationsBeforeStop(deploy.Annotations) {
+		logger.Info("Skip stop deploy because it has unexpected annotations", "annotations", deploy.Annotations)
+		return nil
 	}
 	replicas := *deploy.Spec.Replicas
 	updateDeploy := deploy.DeepCopy()
-
-	// add annotations
 	updateDeploy.Annotations[RestartStopTime] = strconv.FormatInt(time.Now().Unix(), 10)
 	updateDeploy.Annotations[ExpectReplicaNums] = strconv.Itoa(int(replicas))
 	updateDeploy.Annotations[RestartStage] = "resizing"
 	updateDeploy.Spec.Replicas = &zero
-	var opts []client.UpdateOption
-	c.log.Info("stop deployment:" + deploy.Name)
-	updateErr := c.client.Update(ctx, updateDeploy, opts...)
-	return updateErr
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		e := c.client.Update(ctx, updateDeploy)
+		return e
+	})
+	return err
+}
+
+func (c *restarter) ensureAnnotationsBeforeStop(annotations map[string]string) bool {
+	if val, ok := annotations[RestartSkip]; ok {
+		skip, _ := strconv.ParseBool(val)
+		if skip {
+			return false
+		}
+	}
+	if stage, ok := annotations[RestartStage]; ok {
+		if stage == "resizing" {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *restarter) stopSts(ctx context.Context, sts *appsV1.StatefulSet) error {
-	var zero int32
-	zero = 0
-	if val, ok := sts.Annotations[RestartSkip]; ok {
-		skip, err := strconv.ParseBool(val)
-		if err != nil {
-			return err
-		}
-		if skip {
-			return nil
-		}
-	}
-	if stage, ok := sts.Annotations[RestartStage]; ok {
-		if stage == "resizing" {
-			return nil
-		}
+	zero := int32(0)
+	nsName := sts.Namespace + "/" + sts.Name
+	logger := c.log.WithName(nsName)
+	if !c.ensureAnnotationsBeforeStop(sts.Annotations) {
+		logger.Info("Skip stop sts because it has unexpected annotations", "annotations", sts.Annotations)
+		return nil
 	}
 	replicas := *sts.Spec.Replicas
 	updateSts := sts.DeepCopy()
-
-	// add annotations
 	updateSts.Annotations[RestartStopTime] = strconv.FormatInt(time.Now().Unix(), 10)
 	updateSts.Annotations[ExpectReplicaNums] = strconv.Itoa(int(replicas))
 	updateSts.Annotations[RestartStage] = "resizing"
 	updateSts.Spec.Replicas = &zero
-	var opts []client.UpdateOption
-	c.log.Info("stop deployment:" + sts.Name)
-	updateErr := c.client.Update(ctx, updateSts, opts...)
-	return updateErr
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		e := c.client.Update(ctx, updateSts)
+		return e
+	})
+	return err
 }
 
-func (c *restarter) StartDeploy(ctx context.Context, deploy *appsV1.Deployment, timeout bool) error {
-	if _, ok := deploy.Annotations[RestartStage]; !ok {
+func (c *restarter) startDeploy(ctx context.Context, deploy *appsV1.Deployment, timeout bool) error {
+	nsName := deploy.Namespace + "/" + deploy.Name
+	logger := c.log.WithName(nsName)
+	if !c.ensureAnnotationsBeforeStart(deploy.Annotations) {
+		logger.Info("Skip start deploy because it has unexpected annotations", "annotations", deploy.Annotations)
 		return nil
 	}
-	if deploy.Annotations[RestartStage] != "resizing" {
-		return fmt.Errorf("Unknown stage, skip ")
-	}
+	rep, _ := strconv.Atoi(deploy.Annotations[ExpectReplicaNums])
+	replicas := int32(rep)
 	updateDeploy := deploy.DeepCopy()
-	if _, ok := deploy.Annotations[ExpectReplicaNums]; !ok {
-		return fmt.Errorf("Cannot find replica numbers before stop ")
-	}
-	expectReplicaNums, err := strconv.Atoi(deploy.Annotations[ExpectReplicaNums])
-	if err != nil {
-		return err
-	}
-	replicas := int32(expectReplicaNums)
 	if timeout {
 		updateDeploy.Annotations[RestartSkip] = "true"
 	}
@@ -275,28 +303,40 @@ func (c *restarter) StartDeploy(ctx context.Context, deploy *appsV1.Deployment, 
 	delete(updateDeploy.Annotations, ExpectReplicaNums)
 	delete(updateDeploy.Annotations, RestartStage)
 	updateDeploy.Spec.Replicas = &replicas
-	var opts []client.UpdateOption
-	c.log.Info("start deployment: " + deploy.Name)
-	err = c.client.Update(ctx, updateDeploy, opts...)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		e := c.client.Update(ctx, updateDeploy)
+		return e
+	})
 	return err
 }
 
-func (c *restarter) StartSts(ctx context.Context, sts *appsV1.StatefulSet, timeout bool) error {
-	if _, ok := sts.Annotations[RestartStage]; !ok {
+func (c *restarter) ensureAnnotationsBeforeStart(annotations map[string]string) bool {
+	if _, ok := annotations[RestartStage]; !ok {
+		return false
+	}
+	if annotations[RestartStage] != "resizing" {
+		return false
+	}
+	if _, ok := annotations[ExpectReplicaNums]; !ok {
+		return false
+	}
+	replicas, err := strconv.Atoi(annotations[ExpectReplicaNums])
+	if err != nil {
+		return false
+	}
+	return replicas > 0
+}
+
+func (c *restarter) startSts(ctx context.Context, sts *appsV1.StatefulSet, timeout bool) error {
+	nsName := sts.Namespace + "/" + sts.Name
+	logger := c.log.WithName(nsName)
+	if !c.ensureAnnotationsBeforeStart(sts.Annotations) {
+		logger.Info("Skip start sts because it has unexpected annotations", "annotations", sts.Annotations)
 		return nil
 	}
-	if sts.Annotations[RestartStage] != "resizing" {
-		return fmt.Errorf("Unknown stage, skip ")
-	}
+	rep, _ := strconv.Atoi(sts.Annotations[ExpectReplicaNums])
+	replicas := int32(rep)
 	updateSts := sts.DeepCopy()
-	if _, ok := sts.Annotations[ExpectReplicaNums]; !ok {
-		return fmt.Errorf("Cannot find replica numbers before stop ")
-	}
-	expectReplicaNums, err := strconv.Atoi(sts.Annotations[ExpectReplicaNums])
-	if err != nil {
-		return err
-	}
-	replicas := int32(expectReplicaNums)
 	if timeout {
 		updateSts.Annotations[RestartSkip] = "true"
 	}
@@ -304,63 +344,63 @@ func (c *restarter) StartSts(ctx context.Context, sts *appsV1.StatefulSet, timeo
 	delete(updateSts.Annotations, ExpectReplicaNums)
 	delete(updateSts.Annotations, RestartStage)
 	updateSts.Spec.Replicas = &replicas
-	var opts []client.UpdateOption
-	c.log.Info("start deployment: " + sts.Name)
-	err = c.client.Update(ctx, updateSts, opts...)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		e := c.client.Update(ctx, updateSts)
+		return e
+	})
 	return err
 }
 
-func (c *restarter) getDeploy(ctx context.Context, pvc *v1.PersistentVolumeClaim) (*appsV1.Deployment, error) {
-	// get deploy list
+func (c *restarter) getAllDeploy(ctx context.Context) (*appsV1.DeploymentList, error) {
 	deployList := &appsV1.DeploymentList{}
-	var opts []client.ListOption
-	err := c.client.List(ctx, deployList, opts...)
-	if err != nil {
-		return nil, err
-	}
+	err := c.client.List(ctx, deployList)
+	return deployList, err
+}
 
+// getDeploy get the deployment which is using the pvc
+// it has an assumption that the pvc is only used by one deployment, which is true in most cases
+func (c *restarter) getDeploy(ctx context.Context, deployList *appsV1.DeploymentList, pvc *v1.PersistentVolumeClaim) *appsV1.Deployment {
 	for _, deploy := range deployList.Items {
 		if len(deploy.Spec.Template.Spec.Volumes) > 0 {
 			for _, vol := range deploy.Spec.Template.Spec.Volumes {
 				if vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == pvc.Name {
-					return &deploy, nil
+					return &deploy
 				}
 			}
 		}
 	}
-	return nil, nil
+	return nil
 }
 
-func (c *restarter) getSts(ctx context.Context, targetPvc *v1.PersistentVolumeClaim) (*appsV1.StatefulSet, error) {
-	//get all sts
+func (c *restarter) getAllSts(ctx context.Context) (*appsV1.StatefulSetList, error) {
 	stsList := &appsV1.StatefulSetList{}
-	var opts []client.ListOption
-	err := c.client.List(ctx, stsList, opts...)
-	if err != nil {
-		return nil, err
-	}
+	err := c.client.List(ctx, stsList)
+	return stsList, err
+}
 
+// getSts get the statefulset which is using the pvc
+// it has an assumption that the pvc is only used by one statefulset, which is true in most cases
+func (c *restarter) getSts(ctx context.Context, stsList *appsV1.StatefulSetList, targetPvc *v1.PersistentVolumeClaim) *appsV1.StatefulSet {
 	for _, sts := range stsList.Items {
 		if len(sts.Spec.Template.Spec.Volumes) > 0 {
 			for _, vol := range sts.Spec.Template.Spec.Volumes {
 				if vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == targetPvc.Name {
-					return &sts, nil
+					return &sts
 				}
 			}
 		}
 		for _, pvc := range sts.Spec.VolumeClaimTemplates {
-			if pvc.Name == targetPvc.Name {
-				return &sts, nil
+			pattern := fmt.Sprintf("^%s-%s-[0-9]+$", pvc.Name, sts.Name)
+			match, _ := regexp.MatchString(pattern, targetPvc.Name)
+			if match {
+				return &sts
 			}
 		}
 	}
-
-	return nil, fmt.Errorf("Cannot get deployment or statefulSet which pod mounted the pvc %s ", targetPvc.Name)
+	return nil
 }
 
-func (c *restarter) IfDeployTimeout(ctx context.Context, scName string, deploy *appsV1.Deployment) bool {
-	sc := &storagev1.StorageClass{}
-	err := c.client.Get(ctx, types.NamespacedName{Namespace: "", Name: scName}, sc)
+func (c *restarter) ifWorkloadTimeout(ctx context.Context, sc *storagev1.StorageClass, annotations map[string]string) bool {
 	maxTime := 300
 	if val, ok := sc.Annotations[ResizingMaxTime]; ok {
 		userSetTime, err := strconv.Atoi(val)
@@ -368,63 +408,20 @@ func (c *restarter) IfDeployTimeout(ctx context.Context, scName string, deploy *
 			maxTime = userSetTime
 		}
 	}
-	if _, ok := deploy.Annotations[RestartStopTime]; !ok {
-		return false
+	if startResizeTimeStr, ok := annotations[RestartStopTime]; ok {
+		startResizeTime, err := strconv.Atoi(startResizeTimeStr)
+		if err == nil && int(time.Now().Unix())-startResizeTime > maxTime {
+			return true
+		}
 	}
-	startResizeTime, err := strconv.Atoi(deploy.Annotations[RestartStopTime])
-	if err != nil {
-		return true
-	}
-	timeout := int(time.Now().Unix())-startResizeTime > maxTime
-	return timeout
+	return false
 }
 
-func (c *restarter) IfStsTimeout(ctx context.Context, scName string, sts *appsV1.StatefulSet) bool {
-	sc := &storagev1.StorageClass{}
-	err := c.client.Get(ctx, types.NamespacedName{Namespace: "", Name: scName}, sc)
-	maxTime := 300
-	if val, ok := sc.Annotations[ResizingMaxTime]; ok {
-		userSetTime, err := strconv.Atoi(val)
-		if err == nil {
-			maxTime = userSetTime
+func (c *restarter) getScByName(ctx context.Context, scList *storagev1.StorageClassList, name string) *storagev1.StorageClass {
+	for _, sc := range scList.Items {
+		if sc.Name == name {
+			return &sc
 		}
 	}
-	if _, ok := sts.Annotations[RestartStopTime]; !ok {
-		return false
-	}
-	startResizeTime, err := strconv.Atoi(sts.Annotations[RestartStopTime])
-	if err != nil {
-		return true
-	}
-	timeout := int(time.Now().Unix())-startResizeTime > maxTime
-	return timeout
-}
-
-func (c *restarter) getAppList(ctx context.Context, pvcs []v1.PersistentVolumeClaim) (deployToStop []*appsV1.Deployment, stsToStop []*appsV1.StatefulSet, deployTimeout []*appsV1.Deployment, stsTimeout []*appsV1.StatefulSet, err error) {
-	for _, pvc := range pvcs {
-		dep, err := c.getDeploy(ctx, &pvc)
-		if err != nil {
-			return deployToStop, stsToStop, deployTimeout, stsTimeout, err
-		}
-		if dep != nil {
-			if timeout := c.IfDeployTimeout(ctx, *pvc.Spec.StorageClassName, dep); timeout {
-				deployTimeout = append(deployTimeout, dep)
-			} else {
-				deployToStop = append(deployToStop, dep)
-			}
-			continue
-		}
-		sts, stsErr := c.getSts(ctx, &pvc)
-		if stsErr != nil {
-			return deployToStop, stsToStop, deployTimeout, stsTimeout, err
-		}
-		if sts != nil {
-			if timeout := c.IfStsTimeout(ctx, *pvc.Spec.StorageClassName, sts); timeout {
-				stsTimeout = append(stsTimeout, sts)
-			} else {
-				stsToStop = append(stsToStop, sts)
-			}
-		}
-	}
-	return
+	return nil
 }

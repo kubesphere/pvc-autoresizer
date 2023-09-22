@@ -108,6 +108,12 @@ func (w *pvcAutoresizer) getPVCList(ctx context.Context) (*corev1.PersistentVolu
 }
 
 func (w *pvcAutoresizer) reconcile(ctx context.Context) error {
+	type pvcEntry struct {
+		pvc corev1.PersistentVolumeClaim
+		sc  storagev1.StorageClass
+	}
+	targetPVCs := make(map[types.UID]*pvcEntry)
+
 	scs, err := w.getStorageClassList(ctx)
 	if err != nil {
 		w.log.Error(err, "getStorageClassList failed")
@@ -129,12 +135,13 @@ func (w *pvcAutoresizer) reconcile(ctx context.Context) error {
 			return nil
 		}
 		for _, pvc := range pvcs.Items {
-			err := w.validate(ctx, &pvc, &sc, vsMap)
-			if err != nil {
-				return err
+			targetPVCs[pvc.GetUID()] = &pvcEntry{
+				pvc: pvc,
+				sc:  sc,
 			}
 		}
 	}
+
 	pvcList, err := w.getPVCList(ctx)
 	if err != nil {
 		return err
@@ -147,7 +154,14 @@ func (w *pvcAutoresizer) reconcile(ctx context.Context) error {
 			w.log.Error(err, "get storageClass failed")
 			return nil
 		}
-		err = w.validate(ctx, &pvc, &sc, vsMap)
+		targetPVCs[pvc.GetUID()] = &pvcEntry{
+			pvc: pvc,
+			sc:  sc,
+		}
+	}
+
+	for _, entry := range targetPVCs {
+		err = w.validate(ctx, &entry.pvc, &entry.sc, vsMap)
 		if err != nil {
 			return err
 		}
@@ -156,7 +170,7 @@ func (w *pvcAutoresizer) reconcile(ctx context.Context) error {
 	return nil
 }
 
-//Validate if it is the target pvc, and resize
+// Validate if it is the target pvc, and resize
 func (w *pvcAutoresizer) validate(ctx context.Context, pvc *corev1.PersistentVolumeClaim, sc *storagev1.StorageClass, vsMap map[types.NamespacedName]*VolumeStats) error {
 	isTarget, err := isTargetPVC(pvc, sc)
 	if err != nil {
@@ -236,7 +250,7 @@ func (w *pvcAutoresizer) resize(ctx context.Context, pvc *corev1.PersistentVolum
 		log.Error(err, "fetching storage limit failed")
 		return err
 	}
-	if curReq.Cmp(limitRes) == 0 {
+	if curReq.Cmp(limitRes) >= 0 {
 		log.Info("volume storage limit reached")
 		metrics.ResizerLimitReachedTotal.Increment()
 		return nil
@@ -371,7 +385,7 @@ func pvcStorageLimit(pvc *corev1.PersistentVolumeClaim, sc *storagev1.StorageCla
 	// storage limit on the annotation has precedence
 	if annotation, ok := sc.Annotations[StorageLimitAnnotation]; ok && annotation != "" {
 		return resource.ParseQuantity(annotation)
-	} else if annotation, ok := pvc.Annotations[StorageLimitAnnotation]; ok && annotation != "" {
+	} else if annotation, ok = pvc.Annotations[StorageLimitAnnotation]; ok && annotation != "" {
 		return resource.ParseQuantity(annotation)
 	}
 
