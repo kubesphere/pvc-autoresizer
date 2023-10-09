@@ -229,21 +229,37 @@ func (c *restarter) getRestartSc(ctx context.Context, scList *storagev1.StorageC
 	return scMap
 }
 
-func (c *restarter) stopDeploy(ctx context.Context, deploy *appsV1.Deployment) error {
+func (c *restarter) stopDeploy(ctx context.Context, dep *appsV1.Deployment) error {
 	zero := int32(0)
-	nsName := deploy.Namespace + "/" + deploy.Name
+	nsName := dep.Namespace + "/" + dep.Name
 	logger := c.log.WithName(nsName)
+
+	deploy := &appsV1.Deployment{}
+	err := c.client.Get(ctx, client.ObjectKey{Namespace: dep.Namespace, Name: dep.Name}, deploy)
+	if err != nil {
+		return err
+	}
+	if deploy.Spec.Replicas == nil {
+		logger.Info("Skip stop deploy because it has no replicas")
+		return nil
+	}
+	replicas := *deploy.Spec.Replicas
+	if replicas == 0 {
+		logger.Info("Skip stop deploy because it has been stopped")
+		return nil
+	}
+
 	if !c.ensureAnnotationsBeforeStop(deploy.Annotations) {
 		logger.Info("Skip stop deploy because it has unexpected annotations", "annotations", deploy.Annotations)
 		return nil
 	}
-	replicas := *deploy.Spec.Replicas
+
 	updateDeploy := deploy.DeepCopy()
 	updateDeploy.Annotations[RestartStopTime] = strconv.FormatInt(time.Now().Unix(), 10)
 	updateDeploy.Annotations[ExpectReplicaNums] = strconv.Itoa(int(replicas))
 	updateDeploy.Annotations[RestartStage] = "resizing"
 	updateDeploy.Spec.Replicas = &zero
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		e := c.client.Update(ctx, updateDeploy)
 		return e
 	})
@@ -265,34 +281,62 @@ func (c *restarter) ensureAnnotationsBeforeStop(annotations map[string]string) b
 	return true
 }
 
-func (c *restarter) stopSts(ctx context.Context, sts *appsV1.StatefulSet) error {
+func (c *restarter) stopSts(ctx context.Context, s *appsV1.StatefulSet) error {
 	zero := int32(0)
-	nsName := sts.Namespace + "/" + sts.Name
+	nsName := s.Namespace + "/" + s.Name
 	logger := c.log.WithName(nsName)
+
+	sts := &appsV1.StatefulSet{}
+	err := c.client.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: s.Name}, sts)
+	if err != nil {
+		return err
+	}
+	if sts.Spec.Replicas == nil {
+		logger.Info("Skip stop sts because it has no replicas")
+		return nil
+	}
+	replicas := *sts.Spec.Replicas
+	if replicas == 0 {
+		logger.Info("Skip stop sts because it has been stopped")
+		return nil
+	}
+
 	if !c.ensureAnnotationsBeforeStop(sts.Annotations) {
 		logger.Info("Skip stop sts because it has unexpected annotations", "annotations", sts.Annotations)
 		return nil
 	}
-	replicas := *sts.Spec.Replicas
+
 	updateSts := sts.DeepCopy()
 	updateSts.Annotations[RestartStopTime] = strconv.FormatInt(time.Now().Unix(), 10)
 	updateSts.Annotations[ExpectReplicaNums] = strconv.Itoa(int(replicas))
 	updateSts.Annotations[RestartStage] = "resizing"
 	updateSts.Spec.Replicas = &zero
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		e := c.client.Update(ctx, updateSts)
 		return e
 	})
 	return err
 }
 
-func (c *restarter) startDeploy(ctx context.Context, deploy *appsV1.Deployment, timeout bool) error {
-	nsName := deploy.Namespace + "/" + deploy.Name
+func (c *restarter) startDeploy(ctx context.Context, dep *appsV1.Deployment, timeout bool) error {
+	nsName := dep.Namespace + "/" + dep.Name
 	logger := c.log.WithName(nsName)
+
+	deploy := &appsV1.Deployment{}
+	err := c.client.Get(ctx, client.ObjectKey{Namespace: dep.Namespace, Name: dep.Name}, deploy)
+	if err != nil {
+		return err
+	}
+	if deploy.Spec.Replicas != nil && *deploy.Spec.Replicas > 0 {
+		logger.Info("Skip start deploy because it has been started")
+		return nil
+	}
+
 	if !c.ensureAnnotationsBeforeStart(deploy.Annotations) {
 		logger.Info("Skip start deploy because it has unexpected annotations", "annotations", deploy.Annotations)
 		return nil
 	}
+
 	rep, _ := strconv.Atoi(deploy.Annotations[ExpectReplicaNums])
 	replicas := int32(rep)
 	updateDeploy := deploy.DeepCopy()
@@ -303,7 +347,7 @@ func (c *restarter) startDeploy(ctx context.Context, deploy *appsV1.Deployment, 
 	delete(updateDeploy.Annotations, ExpectReplicaNums)
 	delete(updateDeploy.Annotations, RestartStage)
 	updateDeploy.Spec.Replicas = &replicas
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		e := c.client.Update(ctx, updateDeploy)
 		return e
 	})
@@ -327,13 +371,25 @@ func (c *restarter) ensureAnnotationsBeforeStart(annotations map[string]string) 
 	return replicas > 0
 }
 
-func (c *restarter) startSts(ctx context.Context, sts *appsV1.StatefulSet, timeout bool) error {
-	nsName := sts.Namespace + "/" + sts.Name
+func (c *restarter) startSts(ctx context.Context, s *appsV1.StatefulSet, timeout bool) error {
+	nsName := s.Namespace + "/" + s.Name
 	logger := c.log.WithName(nsName)
+
+	sts := &appsV1.StatefulSet{}
+	err := c.client.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: s.Name}, sts)
+	if err != nil {
+		return err
+	}
+	if sts.Spec.Replicas != nil && *sts.Spec.Replicas > 0 {
+		logger.Info("Skip start sts because it has been started")
+		return nil
+	}
+
 	if !c.ensureAnnotationsBeforeStart(sts.Annotations) {
 		logger.Info("Skip start sts because it has unexpected annotations", "annotations", sts.Annotations)
 		return nil
 	}
+
 	rep, _ := strconv.Atoi(sts.Annotations[ExpectReplicaNums])
 	replicas := int32(rep)
 	updateSts := sts.DeepCopy()
@@ -344,7 +400,7 @@ func (c *restarter) startSts(ctx context.Context, sts *appsV1.StatefulSet, timeo
 	delete(updateSts.Annotations, ExpectReplicaNums)
 	delete(updateSts.Annotations, RestartStage)
 	updateSts.Spec.Replicas = &replicas
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		e := c.client.Update(ctx, updateSts)
 		return e
 	})

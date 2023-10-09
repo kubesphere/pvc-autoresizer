@@ -33,7 +33,7 @@ const ResizingMaxTime = "restart.kubesphere.io/max-time"
 // RestartStage is used to record whether autoRestart has finished shutting down the pod
 const RestartStage = "restart.kubesphere.io/stage"
 
-// RestartStopTime is used to record the time when the pod is closed
+// RestartStopTime is used to record the time when the pod is stopped
 const RestartStopTime = "restart.kubesphere.io/stop-time"
 
 // ExpectReplicaNums is used to record the value of replicas before restart
