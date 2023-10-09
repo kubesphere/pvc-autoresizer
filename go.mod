@@ -76,6 +76,4 @@ require (
 	sigs.k8s.io/yaml v1.3.0 // indirect
 )
 
-retract (
-    v0.3.1 // Unexpected version
-)
+retract v0.3.1 // Unexpected version
