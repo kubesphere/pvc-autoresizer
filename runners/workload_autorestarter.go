@@ -85,12 +85,14 @@ func (c *restarter) reconcile(ctx context.Context) error {
 
 	//stop deploy/sts
 	for _, deploy := range wls.deployToStop {
+		c.log.WithValues("namespace", deploy.Namespace, "name", deploy.Name).Info("stop deployment")
 		err = c.stopDeploy(ctx, deploy)
 		if err != nil {
 			return err
 		}
 	}
 	for _, sts := range wls.stsToStop {
+		c.log.WithValues("namespace", sts.Namespace, "name", sts.Name).Info("stop statefulset")
 		err = c.stopSts(ctx, sts)
 		if err != nil {
 			return err
@@ -99,24 +101,28 @@ func (c *restarter) reconcile(ctx context.Context) error {
 
 	//restart
 	for _, deploy := range wls.deployToStart {
+		c.log.WithValues("namespace", deploy.Namespace, "name", deploy.Name).Info("start deployment")
 		err = c.startDeploy(ctx, deploy, false)
 		if err != nil {
 			return err
 		}
 	}
 	for _, deploy := range wls.deployTimeout {
+		c.log.WithValues("namespace", deploy.Namespace, "name", deploy.Name).Info("start deployment of resizing timeout")
 		err = c.startDeploy(ctx, deploy, true)
 		if err != nil {
 			return err
 		}
 	}
 	for _, sts := range wls.stsToStart {
+		c.log.WithValues("namespace", sts.Namespace, "name", sts.Name).Info("start statefulset")
 		err = c.startSts(ctx, sts, false)
 		if err != nil {
 			return err
 		}
 	}
 	for _, sts := range wls.stsTimeout {
+		c.log.WithValues("namespace", sts.Namespace, "name", sts.Name).Info("start statefulset of resizing timeout")
 		err = c.startSts(ctx, sts, true)
 		if err != nil {
 			return err
