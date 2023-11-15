@@ -1,6 +1,6 @@
 GIT_COMMIT=$(shell git rev-parse HEAD | head -c 7)
-IMG ?= kubespheredev/pvc-auto-resizer:${GIT_COMMIT}
-IMGLATEST ?= kubespheredev/pvc-auto-resizer:latest
+IMG ?= kubespheredev/pvc-autoresizer:${GIT_COMMIT}
+IMGLATEST ?= kubespheredev/pvc-autoresizer:latest
 
 .PHONY: build
 build:
