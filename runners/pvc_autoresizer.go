@@ -63,8 +63,8 @@ func (w *pvcAutoresizer) Start(ctx context.Context) error {
 			err := w.reconcile(ctx)
 			metrics.ResizerLoopSecondsTotal.Add(time.Since(startTime).Seconds())
 			if err != nil {
+				// log the error but don't return
 				w.log.Error(err, "failed to reconcile")
-				return err
 			}
 		}
 	}
@@ -156,7 +156,7 @@ func (w *pvcAutoresizer) reconcile(ctx context.Context) error {
 	return nil
 }
 
-//Validate if it is the target pvc, and resize
+// Validate if it is the target pvc, and resize
 func (w *pvcAutoresizer) validate(ctx context.Context, pvc *corev1.PersistentVolumeClaim, sc *storagev1.StorageClass, vsMap map[types.NamespacedName]*VolumeStats) error {
 	isTarget, err := isTargetPVC(pvc, sc)
 	if err != nil {
