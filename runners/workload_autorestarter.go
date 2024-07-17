@@ -47,8 +47,8 @@ func (c *restarter) Start(ctx context.Context) error {
 		case <-ticker.C:
 			err := c.reconcile(ctx)
 			if err != nil {
+				// log the error but don't return
 				c.log.Error(err, "failed to reconcile")
-				return err
 			}
 		}
 	}
