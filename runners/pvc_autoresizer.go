@@ -63,8 +63,8 @@ func (w *pvcAutoresizer) Start(ctx context.Context) error {
 			err := w.reconcile(ctx)
 			metrics.ResizerLoopSecondsTotal.Add(time.Since(startTime).Seconds())
 			if err != nil {
+				// log the error but don't return
 				w.log.Error(err, "failed to reconcile")
-				return err
 			}
 		}
 	}
@@ -117,13 +117,13 @@ func (w *pvcAutoresizer) reconcile(ctx context.Context) error {
 	scs, err := w.getStorageClassList(ctx)
 	if err != nil {
 		w.log.Error(err, "getStorageClassList failed")
-		return nil
+		return err
 	}
 
 	vsMap, err := w.metricsClient.GetMetrics(ctx)
 	if err != nil {
 		w.log.Error(err, "metricsClient.GetMetrics failed")
-		return nil
+		return err
 	}
 
 	for _, sc := range scs.Items {
@@ -132,7 +132,7 @@ func (w *pvcAutoresizer) reconcile(ctx context.Context) error {
 		if err != nil {
 			metrics.KubernetesClientFailTotal.Increment()
 			w.log.Error(err, "list pvc failed")
-			return nil
+			return err
 		}
 		for _, pvc := range pvcs.Items {
 			targetPVCs[pvc.GetUID()] = &pvcEntry{
@@ -152,7 +152,7 @@ func (w *pvcAutoresizer) reconcile(ctx context.Context) error {
 		if err != nil {
 			metrics.KubernetesClientFailTotal.Increment()
 			w.log.Error(err, "get storageClass failed")
-			return nil
+			return err
 		}
 		targetPVCs[pvc.GetUID()] = &pvcEntry{
 			pvc: pvc,
