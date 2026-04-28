@@ -57,6 +57,7 @@ func (w *pvcAutoresizer) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			w.log.Info("context done for start")
 			return nil
 		case <-ticker.C:
 			startTime := time.Now()
@@ -172,12 +173,17 @@ func (w *pvcAutoresizer) reconcile(ctx context.Context) error {
 
 // Validate if it is the target pvc, and resize
 func (w *pvcAutoresizer) validate(ctx context.Context, pvc *corev1.PersistentVolumeClaim, sc *storagev1.StorageClass, vsMap map[types.NamespacedName]*VolumeStats) error {
+	log := w.log.WithName("validate").WithValues("namespace", pvc.Namespace, "name", pvc.Name)
+	log.Info("operation starts")
+	defer log.Info("operation ends")
+
 	isTarget, err := isTargetPVC(pvc, sc)
 	if err != nil {
 		metrics.ResizerFailedResizeTotal.Increment()
-		w.log.WithValues("namespace", pvc.Namespace, "name", pvc.Name).Error(err, "failed to check target PVC")
+		log.Error(err, "failed to check target PVC")
 		return err
 	} else if !isTarget {
+		log.Info("PVC is not a target")
 		return nil
 	}
 	namespacedName := types.NamespacedName{
@@ -185,6 +191,7 @@ func (w *pvcAutoresizer) validate(ctx context.Context, pvc *corev1.PersistentVol
 		Name:      pvc.Name,
 	}
 	if _, ok := vsMap[namespacedName]; !ok {
+		log.Info("volume stats for this PVC not found")
 		return nil
 	}
 	err = w.resize(ctx, pvc, vsMap[namespacedName], sc)
@@ -197,6 +204,8 @@ func (w *pvcAutoresizer) validate(ctx context.Context, pvc *corev1.PersistentVol
 
 func (w *pvcAutoresizer) resize(ctx context.Context, pvc *corev1.PersistentVolumeClaim, vs *VolumeStats, sc *storagev1.StorageClass) error {
 	log := w.log.WithName("resize").WithValues("namespace", pvc.Namespace, "name", pvc.Name)
+	log.Info("operation starts")
+	defer log.Info("operation ends")
 
 	var resizeThreshold string
 	if annotation, ok := pvc.Annotations[ResizeThresholdAnnotation]; ok && annotation != "" {
