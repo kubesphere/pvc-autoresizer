@@ -225,7 +225,7 @@ func (w *pvcAutoresizer) resize(ctx context.Context, pvc *corev1.PersistentVolum
 	} else {
 		resizeIncrease = sc.Annotations[ResizeIncreaseAnnotation]
 	}
-	increase, err := convertSizeInBytes(resizeIncrease, curReq.Value(), DefaultIncrease)
+	increase, err := convertSizeInBytes(resizeIncrease, vs.CapacityBytes, DefaultIncrease)
 	if err != nil {
 		log.V(logLevelWarn).Info("failed to convert increase annotation", "error", err.Error())
 		// lint:ignore nilerr ignores this because invalid annotations should be allowed.
@@ -260,7 +260,7 @@ func (w *pvcAutoresizer) resize(ctx context.Context, pvc *corev1.PersistentVolum
 		if pvc.Annotations == nil {
 			pvc.Annotations = make(map[string]string)
 		}
-		newReqBytes := int64(math.Ceil(float64(curReq.Value()+increase)/(1<<30))) << 30
+		newReqBytes := int64(math.Ceil(float64(vs.CapacityBytes+increase)/(1<<30))) << 30
 		newReq := resource.NewQuantity(newReqBytes, resource.BinarySI)
 		if newReq.Cmp(limitRes) > 0 {
 			newReq = &limitRes
